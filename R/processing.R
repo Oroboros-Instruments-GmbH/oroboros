@@ -1559,3 +1559,284 @@ extract_flux_tables <- function(project, include_non_experimental = FALSE,
     fcr_bc = split_by_protocol(tables_wide$fcr_bc)
   )
 }
+
+matches_mark_datastructure_field <- function(actual, expected) {
+  if (is.null(actual) || length(actual) == 0 || any(is.na(actual))) return(FALSE)
+  actual <- actual[[1]]
+
+  if (is.numeric(expected)) {
+    actual_num <- suppressWarnings(as.numeric(actual))
+    return(!is.na(actual_num) && isTRUE(all.equal(actual_num, expected)))
+  }
+
+  identical(
+    toupper(trimws(as.character(actual))),
+    toupper(trimws(as.character(expected)))
+  )
+}
+
+extract_mark_channel_value <- function(mark,
+                                       datastructure_label,
+                                       channel_type,
+                                       data_location,
+                                       data_flags,
+                                       value_field = "median") {
+  if (!is.list(mark$values) || length(mark$values) == 0) return(NA_real_)
+
+  for (v in mark$values) {
+    di <- v$datastructureInfo %||% list()
+    label_ok <- matches_mark_datastructure_field(
+      safe_get(di, c("datastructureLabel", "value"), default = NA),
+      datastructure_label
+    )
+    channel_ok <- matches_mark_datastructure_field(
+      safe_get(di, c("channelType", "value"), default = NA),
+      channel_type
+    )
+    location_ok <- matches_mark_datastructure_field(
+      safe_get(di, c("dataLocation", "value"), default = NA),
+      data_location
+    )
+    flags_ok <- matches_mark_datastructure_field(
+      safe_get(di, c("dataFlags", "value"), default = NA),
+      data_flags
+    )
+
+    if (label_ok && channel_ok && location_ok && flags_ok) {
+      value <- v[[value_field]] %||% NA_real_
+      return(as.numeric(value))
+    }
+  }
+
+  NA_real_
+}
+
+#' Extract Other Channel Tables
+#'
+#' Builds mark-based tables for non-flux channels using the same metadata and
+#' mark ordering logic as `extract_flux_tables()`.
+#'
+#' Currently this returns the oxygen signal per mark, using mark values where
+#' `datastructureLabel == "O2"`, `channelType == 0`, `dataLocation == 3`,
+#' and `dataFlags == 0`; the numeric value is taken from `median$value`.
+#'
+#' @param project A `dld8_project` object.
+#' @param include_non_experimental Logical; include non-experimental files.
+#' @param format `"long"` or `"wide"`.
+#' @param verbose Logical; print progress.
+#' @param mark_order_source `"present"` (use marks present in files),
+#'   `"protocol"` (use protocol steps), or `"protocol_then_present"` (fallback).
+#' @param group_by_protocol Logical; when TRUE, return a list of tables per protocol.
+#' @param pkg Package name containing the `protocols` dataset.
+#' @return A list of data frames with one entry, `oxygen`.
+#' @export
+extract_other_channels <- function(project, include_non_experimental = FALSE,
+                                   format = c("long", "wide"),
+                                   verbose = FALSE,
+                                   pkg = "oroboros",
+                                   mark_order_source = c("present", "protocol", "protocol_then_present"),
+                                   group_by_protocol = FALSE) {
+  format <- match.arg(format)
+  mark_order_source <- match.arg(mark_order_source)
+  lib <- load_protocol_library(pkg = pkg)
+
+  source_folder <- project$source_folder
+  rel_files <- project$dld8_files
+  if (isTRUE(include_non_experimental)) {
+    rel_files <- c(rel_files, project$excluded_dld8_files)
+  }
+  if (length(rel_files) == 0) {
+    return(list(
+      oxygen = data.frame()
+    ))
+  }
+
+  rows_oxygen <- list()
+
+  processed_pairs <- 0
+  for (rel in rel_files) {
+    dld8_json <- get_dld8(project, rel)
+    if (is.null(dld8_json)) {
+      if (isTRUE(verbose)) message("[skip] parse failed: ", rel)
+      next
+    }
+
+    for (ch in get_project_chambers(project, rel, include_non_experimental = include_non_experimental)) {
+      md <- get_sample_metadata_from_json(ch, dld8_json)
+      if (length(md) == 0) {
+        if (isTRUE(verbose)) message("[skip] no metadata: ", rel, " ", ch)
+        next
+      }
+
+      marks <- get_marks_from_chamber(ch, dld8_json)
+      if (length(marks) == 0) {
+        if (isTRUE(verbose)) message("[skip] no marks: ", rel, " ", ch)
+        next
+      }
+
+      protocol_raw <- md$protocol %||% NA_character_
+      protocol_id <- extract_protocol_id_R(protocol_raw)
+      protocol_for_lookup <- if (!is.na(protocol_id)) protocol_id else protocol_raw
+      protocol_name <- protocol_raw
+
+      baseline_mark <- if (!is.null(lib)) lib$get_baseline_mark(protocol_for_lookup) else NA_character_
+      reference_mark <- if (!is.null(lib)) lib$get_reference_mark(protocol_for_lookup) else NA_character_
+
+      if (!is.null(project$protocol_overrides) && nrow(project$protocol_overrides) > 0) {
+        po <- project$protocol_overrides
+        match_rows <- po[po$protocol == protocol_raw, , drop = FALSE]
+        if (nrow(match_rows) == 0 && !is.na(protocol_id)) {
+          match_rows <- po[po$protocol == protocol_id, , drop = FALSE]
+        }
+        if (nrow(match_rows) > 0) {
+          if (nzchar(match_rows$baseline[1])) baseline_mark <- match_rows$baseline[1]
+          if (nzchar(match_rows$reference[1])) reference_mark <- match_rows$reference[1]
+        }
+      }
+
+      if (!is.null(project$marker_overrides) && nrow(project$marker_overrides) > 0) {
+        match_rows <- project$marker_overrides[
+          project$marker_overrides$rel_path == rel & project$marker_overrides$chamber == ch, , drop = FALSE
+        ]
+        if (nrow(match_rows) > 0) {
+          if (nzchar(match_rows$baseline[1])) baseline_mark <- match_rows$baseline[1]
+          if (nzchar(match_rows$reference[1])) reference_mark <- match_rows$reference[1]
+        }
+      }
+
+      mark_order <- character()
+      if (mark_order_source == "protocol" || mark_order_source == "protocol_then_present") {
+        if (!is.null(lib)) {
+          mark_order <- lib$get_mark_order(protocol_for_lookup)
+        }
+      }
+      if (mark_order_source == "present" || length(mark_order) == 0) {
+        mark_order <- vapply(marks, function(mk) mk$markName %||% NA_character_, character(1))
+      }
+      mark_order <- mark_order[!is.na(mark_order) & nzchar(mark_order)]
+      if (length(mark_order) == 0) {
+        if (isTRUE(verbose)) message("[skip] empty mark order: ", rel, " ", ch)
+        next
+      }
+
+      baseline_mark <- resolve_marker_text_only(baseline_mark, marks)
+      reference_mark <- resolve_marker_text_only(reference_mark, marks)
+
+      meta_row <- list(
+        rel_path = rel,
+        filename = basename(rel),
+        chamber = ch,
+        chamberVolume = md$chamberVolume %||% NA_real_,
+        sampleAmount = (md$sampleQuantity %||% list())$amount %||% NA_real_,
+        sampleConcentration = if (!is.null(md$chamberVolume) && md$chamberVolume != 0 &&
+                                  !is.null((md$sampleQuantity %||% list())$amount)) {
+          (md$sampleQuantity$amount) / md$chamberVolume
+        } else {
+          NA_real_
+        },
+        baselineMarker = baseline_mark,
+        referenceMarker = reference_mark,
+        baselineStep = if (!is.null(lib) && !is.na(baseline_mark)) {
+          match(baseline_mark, mark_order)
+        } else {
+          NA_integer_
+        },
+        referenceStep = if (!is.null(lib) && !is.na(reference_mark)) {
+          match(reference_mark, mark_order)
+        } else {
+          NA_integer_
+        },
+        oxygraph = md$oxygraph %||% NA_character_,
+        sensor = md$sensor %||% NA_character_,
+        sampleType = md$metaData$sampleType %||% NA_character_,
+        cohort = md$metaData$cohort %||% NA_character_,
+        sampleCode = md$metaData$sampleCode %||% NA_character_,
+        sampleNumber = md$metaData$sampleNumber %||% NA_character_,
+        subsampleNumber = md$metaData$subsampleNumber %||% NA_character_,
+        protocol = protocol_name
+      )
+
+      processed_pairs <- processed_pairs + 1
+      for (mark in mark_order) {
+        mark_idx <- which(vapply(marks, function(mk) identical(mk$markName, mark), logical(1)))[1]
+        oxygen_val <- if (!is.na(mark_idx)) {
+          extract_mark_channel_value(
+            marks[[mark_idx]],
+            datastructure_label = "O2",
+            channel_type = 0,
+            data_location = 3,
+            data_flags = 0,
+            value_field = "median"
+          )
+        } else {
+          NA_real_
+        }
+
+        if (isTRUE(verbose)) {
+          message(sprintf("[debug] %s %s mark=%s oxygen=%s", rel, ch, mark, oxygen_val))
+        }
+
+        rows_oxygen <- c(rows_oxygen, list(as.data.frame(c(
+          meta_row, list(mark = mark, value = oxygen_val)
+        ))))
+      }
+    }
+  }
+
+  if (isTRUE(verbose)) message("[info] processed pairs: ", processed_pairs)
+  to_df <- function(rows) if (length(rows) == 0) data.frame() else do.call(rbind, rows)
+  tables_long <- list(
+    oxygen = to_df(rows_oxygen)
+  )
+
+  if (format == "long") {
+    if (!isTRUE(group_by_protocol)) return(tables_long)
+    split_by_protocol <- function(df) {
+      if (nrow(df) == 0) return(list())
+      split(df, df$protocol, drop = TRUE)
+    }
+    return(list(
+      oxygen = split_by_protocol(tables_long$oxygen)
+    ))
+  }
+
+  meta_cols <- c(
+    "rel_path","filename","chamber","chamberVolume","sampleAmount","sampleConcentration",
+    "baselineMarker","referenceMarker","baselineStep","referenceStep",
+    "oxygraph","sensor",
+    "sampleType","cohort","sampleCode","sampleNumber","subsampleNumber","protocol"
+  )
+
+  wide_from_long <- function(df) {
+    if (nrow(df) == 0) return(df)
+    df$mark <- as.character(df$mark)
+    if (requireNamespace("tidyr", quietly = TRUE)) {
+      wide <- tidyr::pivot_wider(
+        df,
+        id_cols = all_of(meta_cols),
+        names_from = mark,
+        values_from = value,
+        values_fn = list(value = ~ if (length(.x)) .x[[1]] else NA_real_)
+      )
+      return(as.data.frame(wide))
+    }
+    wide <- reshape(df, idvar = meta_cols, timevar = "mark", direction = "wide")
+    colnames(wide) <- sub("^value\\.", "", colnames(wide))
+    wide
+  }
+
+  tables_wide <- list(
+    oxygen = wide_from_long(tables_long$oxygen)
+  )
+
+  if (!isTRUE(group_by_protocol)) return(tables_wide)
+
+  split_by_protocol <- function(df) {
+    if (nrow(df) == 0) return(list())
+    split(df, df$protocol, drop = TRUE)
+  }
+
+  list(
+    oxygen = split_by_protocol(tables_wide$oxygen)
+  )
+}
