@@ -496,10 +496,12 @@ get_sample_metadata_from_json <- function(chamber_id, dld8_json) {
     sensor = safe_get(run_data, c(chamber_key, "oxygenCalibration", "airSensorNumber", "value")),
     a0 = safe_get(background, c("a0", "value")),
     b0 = safe_get(background, c("b0", "value")),
+    r2 = safe_get(background, c("r2", "value")),
     R1 = safe_get(run_data, c(chamber_key, "oxygenCalibration", "r1", "value")),
     backgroundCorrection = list(
       a0 = safe_get(background, c("a0", "value")),
-      b0 = safe_get(background, c("b0", "value"))
+      b0 = safe_get(background, c("b0", "value")),
+      r2 = safe_get(background, c("r2", "value"))
     ),
     sampleQuantity = list(
       amount = safe_get(info, c("normalizations", "normalizations_0", "amount", "value")),
@@ -742,6 +744,7 @@ extract_metadata_df <- function(project, include_non_experimental = FALSE) {
         chamberVolume = md$chamberVolume %||% NA_real_,
         a0 = md$a0 %||% NA_real_,
         b0 = md$b0 %||% NA_real_,
+        r2 = md$r2 %||% NA_real_,
         R1 = md$R1 %||% NA_real_,
         calibrationStatus = md$calibrationStatus %||% NA,
         temperatureStatus = md$temperatureStatus %||% NA,
@@ -1421,6 +1424,7 @@ extract_flux_tables <- function(project, include_non_experimental = FALSE,
         } else {
           NA_integer_
         },
+        r2 = md$r2 %||% NA_real_,
         oxygraph = md$oxygraph %||% NA_character_,
         sensor = md$sensor %||% NA_character_,
         sampleType = md$metaData$sampleType %||% NA_character_,
@@ -1513,7 +1517,7 @@ extract_flux_tables <- function(project, include_non_experimental = FALSE,
 
   meta_cols <- c(
     "rel_path","filename","chamber","chamberVolume","sampleAmount","sampleConcentration",
-    "baselineMarker","referenceMarker","baselineStep","referenceStep",
+    "baselineMarker","referenceMarker","baselineStep","referenceStep","r2",
     "oxygraph","sensor",
     "sampleType","cohort","sampleCode","sampleNumber","subsampleNumber","protocol"
   )
@@ -1746,6 +1750,7 @@ extract_other_channels <- function(project, include_non_experimental = FALSE,
         } else {
           NA_integer_
         },
+        r2 = md$r2 %||% NA_real_,
         oxygraph = md$oxygraph %||% NA_character_,
         sensor = md$sensor %||% NA_character_,
         sampleType = md$metaData$sampleType %||% NA_character_,
@@ -1802,7 +1807,7 @@ extract_other_channels <- function(project, include_non_experimental = FALSE,
 
   meta_cols <- c(
     "rel_path","filename","chamber","chamberVolume","sampleAmount","sampleConcentration",
-    "baselineMarker","referenceMarker","baselineStep","referenceStep",
+    "baselineMarker","referenceMarker","baselineStep","referenceStep","r2",
     "oxygraph","sensor",
     "sampleType","cohort","sampleCode","sampleNumber","subsampleNumber","protocol"
   )
