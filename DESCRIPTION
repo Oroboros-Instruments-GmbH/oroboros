@@ -18,4 +18,10 @@ LazyData: true
 Imports:
 	mongolite (>= 4.0.0),
 	jsonlite (>= 2.0.0)
+Suggests:
+	ggplot2,
+	ggrepel,
+	ggtext,
+	patchwork,
+	RThemes
 

@@ -302,6 +302,44 @@ build_file_cache <- function(source_folder, rel_files) {
   do.call(rbind, rows)
 }
 
+get_project_cache_env <- function(project) {
+  if (is.environment(project$derived_cache)) return(project$derived_cache)
+  if (is.environment(project$parsed_dld8)) return(project$parsed_dld8)
+  NULL
+}
+
+metadata_df_cache_key <- function(include_non_experimental = FALSE) {
+  if (isTRUE(include_non_experimental)) {
+    ".__oroboros_metadata_df_all__"
+  } else {
+    ".__oroboros_metadata_df__"
+  }
+}
+
+marks_df_cache_key <- function(include_non_experimental = FALSE) {
+  if (isTRUE(include_non_experimental)) {
+    ".__oroboros_marks_df_all__"
+  } else {
+    ".__oroboros_marks_df__"
+  }
+}
+
+invalidate_derived_cache <- function(project) {
+  cache_env <- get_project_cache_env(project)
+  if (!is.environment(cache_env)) return(invisible(NULL))
+  for (key in c(
+    metadata_df_cache_key(FALSE),
+    metadata_df_cache_key(TRUE),
+    marks_df_cache_key(FALSE),
+    marks_df_cache_key(TRUE)
+  )) {
+    if (exists(key, envir = cache_env, inherits = FALSE)) {
+      rm(list = key, envir = cache_env)
+    }
+  }
+  invisible(NULL)
+}
+
 #' Retrieve parsed JSON for a project file, caching in the project
 #'
 #' The project stores an environment in `project$parsed_dld8` so that
@@ -457,6 +495,16 @@ oroboros_temp_is_ok <- function(dld8_json, temp) {
   run_temp <- safe_get(run_data, c("measurementConfig", "temperature", "value"), default = NA_real_)
   if (is.na(run_temp)) return(FALSE)
   isTRUE(all.equal(as.numeric(run_temp), as.numeric(temp)))
+}
+
+a0_ok <- function(a0) {
+  if (is.null(a0) || is.na(a0)) return(FALSE)
+  isTRUE(as.numeric(a0) < 0)
+}
+
+r2_ok <- function(r2) {
+  if (is.null(r2) || is.na(r2)) return(FALSE)
+  isTRUE(as.numeric(r2) > 0.8)
 }
 
 #' Extract Sample Metadata From DLD8 JSON
@@ -615,6 +663,7 @@ new_dld8_project <- function(source_folder, rel_files, excluded_files, exclude_n
       parse_errors = parse_errors,
       file_cache = file_cache,
       parsed_dld8 = parsed_dld8,
+      derived_cache = new.env(parent = emptyenv()),
       marker_overrides = data.frame(
         rel_path = character(),
         chamber = character(),
@@ -713,12 +762,21 @@ create_dld8_project <- function(source_folder, exclude_non_experimental = TRUE, 
 #' @return Data frame of metadata (one row per file/chamber).
 #' @export
 extract_metadata_df <- function(project, include_non_experimental = FALSE) {
-  source_folder <- project$source_folder
+  cache_env <- get_project_cache_env(project)
+  cache_key <- metadata_df_cache_key(include_non_experimental)
+  if (is.environment(cache_env) && exists(cache_key, envir = cache_env, inherits = FALSE)) {
+    return(cache_env[[cache_key]])
+  }
+
   rel_files <- project$dld8_files
   if (isTRUE(include_non_experimental)) {
     rel_files <- c(rel_files, project$excluded_dld8_files)
   }
-  if (length(rel_files) == 0) return(data.frame())
+  if (length(rel_files) == 0) {
+    out <- data.frame()
+    if (is.environment(cache_env)) cache_env[[cache_key]] <- out
+    return(out)
+  }
 
   rows <- list()
   for (rel in rel_files) {
@@ -753,8 +811,139 @@ extract_metadata_df <- function(project, include_non_experimental = FALSE) {
       rows <- c(rows, list(row))
     }
   }
-  if (length(rows) == 0) return(data.frame())
-  do.call(rbind, rows)
+  out <- if (length(rows) == 0) data.frame() else do.call(rbind, rows)
+  if (is.environment(cache_env)) cache_env[[cache_key]] <- out
+  out
+}
+
+#' Add Background QC Columns to Metadata
+#'
+#' Returns the metadata data frame with background correction QC columns
+#' derived from `a0` and `r2`. When `plot = TRUE`, it also renders
+#' QC plots for `r2` and `a0` if the required plotting packages are available.
+#'
+#' @param project A `dld8_project` object.
+#' @param plot Logical; if `TRUE`, draw QC plots for `r2` and `a0`.
+#' @return Metadata data frame with appended logical columns `a0_ok` and `r2_ok`.
+#' @export
+qc_background <- function(project, plot = TRUE) {
+  metadata_df <- extract_metadata_df(project)
+  metadata_df$a0_ok <- vapply(metadata_df$a0, a0_ok, logical(1))
+  metadata_df$r2_ok <- vapply(metadata_df$r2, r2_ok, logical(1))
+
+  if (isTRUE(plot) && nrow(metadata_df) > 0) {
+    needed <- c("ggplot2", "ggrepel", "patchwork", "RThemes", "ggtext")
+    missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+    if (length(missing) > 0) {
+      warning(
+        "Skipping qc_background plot; install required packages: ",
+        paste(missing, collapse = ", "),
+        call. = FALSE
+      )
+      return(metadata_df)
+    }
+
+    metadata_plot_df <- metadata_df
+    metadata_plot_df$entity <- paste(metadata_plot_df$rel_path, metadata_plot_df$chamber, sep = " | ")
+    metadata_plot_df$sample_label <- metadata_plot_df$sampleCode
+    missing_label <- is.na(metadata_plot_df$sample_label) | !nzchar(trimws(metadata_plot_df$sample_label))
+    metadata_plot_df$sample_label[missing_label] <- metadata_plot_df$entity[missing_label]
+
+    flag_r2 <- metadata_plot_df[!metadata_plot_df$r2_ok, , drop = FALSE]
+    flag_a0 <- metadata_plot_df[!metadata_plot_df$a0_ok, , drop = FALSE]
+
+    p_r2 <- ggplot2::ggplot(
+      metadata_plot_df,
+      ggplot2::aes(x = entity, y = r2)
+    ) +
+      ggplot2::annotate(
+        "rect",
+        xmin = -Inf,
+        xmax = Inf,
+        ymin = -Inf,
+        ymax = 0.8,
+        fill = "#BE1622",
+        alpha = 0.15
+      ) +
+      ggplot2::geom_boxplot(alpha = 0.7) +
+      ggplot2::geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
+      ggrepel::geom_label_repel(
+        data = flag_r2,
+        ggplot2::aes(label = sample_label),
+        size = 3,
+        max.overlaps = Inf,
+        direction = "y",
+        fill = "#BE1622",
+        color = "white",
+        label.size = 0.2,
+        alpha = 0.95
+      ) +
+      ggplot2::geom_hline(
+        yintercept = 0.8,
+        linetype = "dashed",
+        color = "#BE1622"
+      ) +
+      RThemes::theme_neat() +
+      ggplot2::theme(
+        axis.text.x = ggplot2::element_blank(),
+        axis.ticks.x = ggplot2::element_blank(),
+        axis.title.x = ggplot2::element_blank(),
+        plot.title = ggtext::element_markdown(),
+        axis.title.y = ggtext::element_markdown()
+      ) +
+      ggplot2::labs(
+        title = "R<sup>2</sup> per entity",
+        y = "R<sup>2</sup>"
+      )
+
+    p_a0 <- ggplot2::ggplot(
+      metadata_plot_df,
+      ggplot2::aes(x = entity, y = a0)
+    ) +
+      ggplot2::annotate(
+        "rect",
+        xmin = -Inf,
+        xmax = Inf,
+        ymin = 0,
+        ymax = Inf,
+        fill = "#BE1622",
+        alpha = 0.15
+      ) +
+      ggplot2::geom_boxplot(alpha = 0.7) +
+      ggplot2::geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
+      ggrepel::geom_label_repel(
+        data = flag_a0,
+        ggplot2::aes(label = sample_label),
+        size = 3,
+        max.overlaps = Inf,
+        direction = "y",
+        fill = "#BE1622",
+        color = "white",
+        label.size = 0.2,
+        alpha = 0.95
+      ) +
+      ggplot2::geom_hline(
+        yintercept = 0,
+        linetype = "dashed",
+        color = "#BE1622"
+      ) +
+      RThemes::theme_neat() +
+      ggplot2::theme(
+        axis.text.x = ggplot2::element_blank(),
+        axis.ticks.x = ggplot2::element_blank(),
+        axis.title.x = ggplot2::element_blank(),
+        plot.title = ggtext::element_markdown(),
+        axis.title.y = ggtext::element_markdown()
+      ) +
+      ggplot2::labs(
+        title = "A<sub>0</sub> per entity",
+        y = "A<sub>0</sub> (pmol/(s·mL))"
+      )
+
+    print(patchwork::wrap_plots(p_r2, p_a0, ncol = 2))
+  }
+
+  metadata_df
 }
 
 #' Extract Marks Data Frame
@@ -764,12 +953,21 @@ extract_metadata_df <- function(project, include_non_experimental = FALSE) {
 #' @return Data frame of marks (one row per mark).
 #' @export
 extract_marks_df <- function(project, include_non_experimental = FALSE) {
-  source_folder <- project$source_folder
+  cache_env <- get_project_cache_env(project)
+  cache_key <- marks_df_cache_key(include_non_experimental)
+  if (is.environment(cache_env) && exists(cache_key, envir = cache_env, inherits = FALSE)) {
+    return(cache_env[[cache_key]])
+  }
+
   rel_files <- project$dld8_files
   if (isTRUE(include_non_experimental)) {
     rel_files <- c(rel_files, project$excluded_dld8_files)
   }
-  if (length(rel_files) == 0) return(data.frame())
+  if (length(rel_files) == 0) {
+    out <- data.frame()
+    if (is.environment(cache_env)) cache_env[[cache_key]] <- out
+    return(out)
+  }
 
   rows <- list()
   for (rel in rel_files) {
@@ -802,8 +1000,9 @@ extract_marks_df <- function(project, include_non_experimental = FALSE) {
       }
     }
   }
-  if (length(rows) == 0) return(data.frame())
-  do.call(rbind, rows)
+  out <- if (length(rows) == 0) data.frame() else do.call(rbind, rows)
+  if (is.environment(cache_env)) cache_env[[cache_key]] <- out
+  out
 }
 
 #' Check for Changes in Project Files
@@ -874,6 +1073,9 @@ check_project_changes <- function(project, include_non_experimental = TRUE,
       }
       project$parsed_dld8 <- env_new
     }
+    if (!is.environment(project$derived_cache)) {
+      project$derived_cache <- new.env(parent = emptyenv())
+    }
     env <- project$parsed_dld8
 
     exclude_non_experimental <- project$settings$exclude_non_experimental %||% TRUE
@@ -920,6 +1122,9 @@ check_project_changes <- function(project, include_non_experimental = TRUE,
     }
 
     project$excluded_chambers <- normalize_excluded_chambers_df(project$excluded_chambers)
+    if (length(c(changed, added, removed)) > 0) {
+      invalidate_derived_cache(project)
+    }
 
     out$project <- project
   }
