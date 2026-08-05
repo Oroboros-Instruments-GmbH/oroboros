@@ -37,15 +37,20 @@ print(project$excluded_chambers)   # Chamber-level exclusions within otherwise i
 ### Marks and file information
 
 - `extract_marks_df` results in a long-format dataframe with information on each mark. E.g. `markName`, `RespiratoryState`, `calibrationVolume`.
-- `metadata_df` results in a wide format dataframe with each row an entity (`file` x `chamber`) with its metadata. E.g. `sampleCode`, `sampleNumber`, etc.
+- `extract_metadata_df` results in a wide format dataframe with each row an entity (`file` x `chamber`) with its metadata. E.g. `sampleCode`, `sampleNumber`, etc.
+- `get_qc_df` returns the QC-oriented subset of that metadata, including `protocol`, `a0`, `b0`, `R1`, `calibrationStatus`, `temperatureStatus`, and the normalization fields `normalizationType`, `normalizationUnit`, and `normalizationAmount`. It defaults to `format = "wide"` and can also be requested in `format = "long"`.
 
 ```r
 marks_df <- extract_marks_df(project)
 metadata_df <- extract_metadata_df(project)
+qc_df <- get_qc_df(project)
+qc_df_long <- get_qc_df(project, format = "long")
 
 # Include non-experimental files if desired
 marks_all <- extract_marks_df(project, include_non_experimental = TRUE)
 metadata_all <- extract_metadata_df(project, include_non_experimental = TRUE)
+qc_all <- get_qc_df(project, include_non_experimental = TRUE)
+qc_all_long <- get_qc_df(project, include_non_experimental = TRUE, format = "long")
 ```
 
 ### Baseline/reference markers

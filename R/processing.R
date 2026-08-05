@@ -316,6 +316,14 @@ metadata_df_cache_key <- function(include_non_experimental = FALSE) {
   }
 }
 
+qc_df_cache_key <- function(include_non_experimental = FALSE) {
+  if (isTRUE(include_non_experimental)) {
+    ".__oroboros_qc_df_all__"
+  } else {
+    ".__oroboros_qc_df__"
+  }
+}
+
 marks_df_cache_key <- function(include_non_experimental = FALSE) {
   if (isTRUE(include_non_experimental)) {
     ".__oroboros_marks_df_all__"
@@ -330,6 +338,8 @@ invalidate_derived_cache <- function(project) {
   for (key in c(
     metadata_df_cache_key(FALSE),
     metadata_df_cache_key(TRUE),
+    qc_df_cache_key(FALSE),
+    qc_df_cache_key(TRUE),
     marks_df_cache_key(FALSE),
     marks_df_cache_key(TRUE)
   )) {
@@ -556,6 +566,9 @@ get_sample_metadata_from_json <- function(chamber_id, dld8_json) {
       volume = safe_get(settings, c("value"))
     ),
     chamberVolume = safe_get(settings, c("value")),
+    normalizationType = safe_get(info, c("normalizations", "normalizations_0", "normalizationType", "value")),
+    normalizationUnit = safe_get(info, c("normalizations", "normalizations_0", "unit", "value")),
+    normalizationAmount = safe_get(info, c("normalizations", "normalizations_0", "amount", "value")),
     calibrationStatus = air_calibration_is_same_day(dld8_json),
     temperatureStatus = oroboros_temp_is_ok(dld8_json, EXPECTED_OROBOROS_TEMPERATURE)
   )
@@ -753,6 +766,138 @@ create_dld8_project <- function(source_folder, exclude_non_experimental = TRUE, 
                    parse_errors = parse_errors,
                    parsed_dld8 = parsed_env,
                    excluded_chambers = excluded_chambers)
+}
+
+#' Extract QC Data Frame
+#'
+#' @param project A `dld8_project` object.
+#' @param include_non_experimental Logical; include non-experimental files.
+#' @param format Character; either `"wide"` (default, one row per file/chamber)
+#'   or `"long"` (one row per metric/value pair).
+#' @return Data frame of QC metadata.
+#' @export
+get_qc_df <- function(project, include_non_experimental = FALSE,
+                       format = c("wide", "long")) {
+  format <- match.arg(format)
+  cache_env <- get_project_cache_env(project)
+  cache_key <- qc_df_cache_key(include_non_experimental)
+  if (is.environment(cache_env) && exists(cache_key, envir = cache_env, inherits = FALSE)) {
+    wide_out <- cache_env[[cache_key]]
+    if (identical(format, "wide")) {
+      return(wide_out)
+    }
+    if (nrow(wide_out) == 0) {
+      return(data.frame(
+        rel_path = character(),
+        chamber = character(),
+        protocol = character(),
+        metric = character(),
+        value = I(list()),
+        stringsAsFactors = FALSE
+      ))
+    }
+    value_cols <- c(
+      "a0", "b0", "R1", "calibrationStatus", "temperatureStatus",
+      "normalizationType", "normalizationUnit", "normalizationAmount"
+    )
+    long_rows <- list()
+    for (i in seq_len(nrow(wide_out))) {
+      row <- wide_out[i, , drop = FALSE]
+      for (metric in value_cols) {
+        long_rows <- c(long_rows, list(data.frame(
+          rel_path = row$rel_path,
+          chamber = row$chamber,
+          protocol = row$protocol,
+          metric = metric,
+          value = row[[metric]],
+          stringsAsFactors = FALSE
+        )))
+      }
+    }
+    return(do.call(rbind, long_rows))
+  }
+
+  rel_files <- project$dld8_files
+  if (isTRUE(include_non_experimental)) {
+    rel_files <- c(rel_files, project$excluded_dld8_files)
+  }
+  if (length(rel_files) == 0) {
+    out <- data.frame()
+    if (is.environment(cache_env)) cache_env[[cache_key]] <- out
+    if (identical(format, "wide")) return(out)
+    return(data.frame(
+      rel_path = character(),
+      chamber = character(),
+      protocol = character(),
+      metric = character(),
+      value = I(list()),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  rows <- list()
+  for (rel in rel_files) {
+    dld8_json <- get_dld8(project, rel)
+    if (is.null(dld8_json)) next
+    for (ch in get_project_chambers(project, rel, include_non_experimental = include_non_experimental)) {
+      md <- get_sample_metadata_from_json(ch, dld8_json)
+      if (length(md) == 0) next
+      row <- data.frame(
+        rel_path = rel,
+        chamber = ch,
+        protocol = md$protocol %||% NA_character_,
+        a0 = md$a0 %||% NA_real_,
+        b0 = md$b0 %||% NA_real_,
+        R1 = md$R1 %||% NA_real_,
+        calibrationStatus = md$calibrationStatus %||% NA,
+        temperatureStatus = md$temperatureStatus %||% NA,
+        normalizationType = md$normalizationType %||% NA_character_,
+        normalizationUnit = md$normalizationUnit %||% NA_character_,
+        normalizationAmount = md$normalizationAmount %||% NA_real_,
+        stringsAsFactors = FALSE
+      )
+      rows <- c(rows, list(row))
+    }
+  }
+
+  wide_out <- if (length(rows) == 0) data.frame() else do.call(rbind, rows)
+  if (is.environment(cache_env)) cache_env[[cache_key]] <- wide_out
+
+  if (identical(format, "wide")) {
+    return(wide_out)
+  }
+
+  if (nrow(wide_out) == 0) {
+    return(data.frame(
+      rel_path = character(),
+      chamber = character(),
+      protocol = character(),
+      metric = character(),
+      value = I(list()),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  value_cols <- c(
+    "a0", "b0", "R1", "calibrationStatus", "temperatureStatus",
+    "normalizationType", "normalizationUnit", "normalizationAmount"
+  )
+  long_rows <- list()
+  for (i in seq_len(nrow(wide_out))) {
+    row <- wide_out[i, , drop = FALSE]
+    for (metric in value_cols) {
+      long_rows <- c(long_rows, list(data.frame(
+        rel_path = row$rel_path,
+        chamber = row$chamber,
+        protocol = row$protocol,
+        metric = metric,
+        value = row[[metric]],
+        stringsAsFactors = FALSE
+      )))
+    }
+  }
+
+  do.call(rbind, long_rows)
 }
 
 #' Extract Metadata Data Frame
