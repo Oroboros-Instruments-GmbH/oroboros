@@ -552,9 +552,14 @@ get_sample_metadata_from_json <- function(chamber_id, dld8_json) {
     operator = safe_get(run_data, c("userInfo", "userName", "value")),
     oxygraph = safe_get(run_data, c("oxygraphInfo", "serialNumber", "value")),
     sensor = safe_get(run_data, c(chamber_key, "oxygenCalibration", "airSensorNumber", "value")),
+    airCalibration_filename = safe_get(
+      run_data,
+      c(chamber_key, "oxygenCalibration", "airCalibrationFilename", "value")
+    ),
     a0 = safe_get(background, c("a0", "value")),
     b0 = safe_get(background, c("b0", "value")),
     r2 = safe_get(background, c("r2", "value")),
+    backgroundCorrection_filename = safe_get(background, c("metaData", "filePath", "value")),
     R1 = safe_get(run_data, c(chamber_key, "oxygenCalibration", "r1", "value")),
     backgroundCorrection = list(
       a0 = safe_get(background, c("a0", "value")),
@@ -781,7 +786,12 @@ get_qc_df <- function(project, include_non_experimental = FALSE,
   format <- match.arg(format)
   cache_env <- get_project_cache_env(project)
   cache_key <- qc_df_cache_key(include_non_experimental)
-  if (is.environment(cache_env) && exists(cache_key, envir = cache_env, inherits = FALSE)) {
+  required_qc_cols <- c("airCalibration_filename", "backgroundCorrection_filename")
+  cache_is_current <- is.environment(cache_env) &&
+    exists(cache_key, envir = cache_env, inherits = FALSE) &&
+    (nrow(cache_env[[cache_key]]) == 0 ||
+       all(required_qc_cols %in% names(cache_env[[cache_key]])))
+  if (cache_is_current) {
     wide_out <- cache_env[[cache_key]]
     if (identical(format, "wide")) {
       return(wide_out)
@@ -798,7 +808,8 @@ get_qc_df <- function(project, include_non_experimental = FALSE,
     }
     value_cols <- c(
       "a0", "b0", "R1", "calibrationStatus", "temperatureStatus",
-      "normalizationType", "normalizationUnit", "normalizationAmount"
+      "normalizationType", "normalizationUnit", "normalizationAmount",
+      "airCalibration_filename", "backgroundCorrection_filename"
     )
     long_rows <- list()
     for (i in seq_len(nrow(wide_out))) {
@@ -854,6 +865,8 @@ get_qc_df <- function(project, include_non_experimental = FALSE,
         normalizationType = md$normalizationType %||% NA_character_,
         normalizationUnit = md$normalizationUnit %||% NA_character_,
         normalizationAmount = md$normalizationAmount %||% NA_real_,
+        airCalibration_filename = md$airCalibration_filename %||% NA_character_,
+        backgroundCorrection_filename = md$backgroundCorrection_filename %||% NA_character_,
         stringsAsFactors = FALSE
       )
       rows <- c(rows, list(row))
@@ -880,7 +893,8 @@ get_qc_df <- function(project, include_non_experimental = FALSE,
 
   value_cols <- c(
     "a0", "b0", "R1", "calibrationStatus", "temperatureStatus",
-    "normalizationType", "normalizationUnit", "normalizationAmount"
+    "normalizationType", "normalizationUnit", "normalizationAmount",
+    "airCalibration_filename", "backgroundCorrection_filename"
   )
   long_rows <- list()
   for (i in seq_len(nrow(wide_out))) {

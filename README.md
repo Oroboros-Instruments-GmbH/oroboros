@@ -38,7 +38,7 @@ print(project$excluded_chambers)   # Chamber-level exclusions within otherwise i
 
 - `extract_marks_df` results in a long-format dataframe with information on each mark. E.g. `markName`, `RespiratoryState`, `calibrationVolume`.
 - `extract_metadata_df` results in a wide format dataframe with each row an entity (`file` x `chamber`) with its metadata. E.g. `sampleCode`, `sampleNumber`, etc.
-- `get_qc_df` returns the QC-oriented subset of that metadata, including `protocol`, `a0`, `b0`, `R1`, `calibrationStatus`, `temperatureStatus`, and the normalization fields `normalizationType`, `normalizationUnit`, and `normalizationAmount`. It defaults to `format = "wide"` and can also be requested in `format = "long"`.
+- `get_qc_df` returns the QC-oriented subset of that metadata, including `protocol`, `a0`, `b0`, `R1`, `calibrationStatus`, `temperatureStatus`, the normalization fields `normalizationType`, `normalizationUnit`, and `normalizationAmount`, and the source-file fields `airCalibration_filename` and `backgroundCorrection_filename`. It defaults to `format = "wide"` and can also be requested in `format = "long"`.
 
 ```r
 marks_df <- extract_marks_df(project)
