@@ -12,7 +12,10 @@ extract_marks_df(project, include_non_experimental = FALSE)
 \item{include_non_experimental}{Logical; include non-experimental files.}
 }
 \value{
-Data frame of marks (one row per mark).
+Data frame of marks (one row per mark). The logical
+\code{calibrationEntry} column is \code{NA} when the chamber has no background
+calibration entries, and otherwise indicates whether the mark name is present
+among those entries.
 }
 \description{
 Extract Marks Data Frame

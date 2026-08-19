@@ -467,6 +467,24 @@ get_chamber_key_name <- function(chamber_id) {
   }
 }
 
+get_background_calibration_entry_names <- function(dld8_json, chamber_id) {
+  run_data <- get_latest_run_data(dld8_json)
+  chamber_key <- get_chamber_key_name(chamber_id)
+  entries <- safe_get(
+    run_data,
+    c(chamber_key, "oxygenBackgroundCorrection", "calibrationEntries"),
+    default = list()
+  )
+
+  if (!is.list(entries) || length(entries) == 0) return(NULL)
+
+  entry_names <- vapply(entries, function(entry) {
+    name <- safe_get(entry, c("name", "value"), default = NA_character_)
+    if (length(name) == 0 || is.na(name[[1]])) NA_character_ else as.character(name[[1]])
+  }, character(1))
+  unname(entry_names[!is.na(entry_names)])
+}
+
 get_protocol_name <- function(dld8_json, chamber_id) {
   run_data <- get_latest_run_data(dld8_json)
   chamber_key <- get_chamber_key_name(chamber_id)
@@ -1109,7 +1127,10 @@ qc_background <- function(project, plot = TRUE) {
 #'
 #' @param project A `dld8_project` object.
 #' @param include_non_experimental Logical; include non-experimental files.
-#' @return Data frame of marks (one row per mark).
+#' @return Data frame of marks (one row per mark). The logical
+#'   `calibrationEntry` column is `NA` when the chamber has no background
+#'   calibration entries, and otherwise indicates whether the mark name is
+#'   present among those entries.
 #' @export
 extract_marks_df <- function(project, include_non_experimental = FALSE) {
   cache_env <- get_project_cache_env(project)
@@ -1135,11 +1156,18 @@ extract_marks_df <- function(project, include_non_experimental = FALSE) {
     for (ch in get_project_chambers(project, rel, include_non_experimental = include_non_experimental)) {
       marks <- get_marks_from_chamber(ch, dld8_json, verbose = FALSE)
       if (length(marks) == 0) next
+      calibration_entry_names <- get_background_calibration_entry_names(dld8_json, ch)
       for (mk in marks) {
+        calibration_entry <- if (is.null(calibration_entry_names)) {
+          NA
+        } else {
+          mk$markName %in% calibration_entry_names
+        }
         row <- data.frame(
           rel_path = rel,
           chamber = ch,
           markName = mk$markName %||% NA_character_,
+          calibrationEntry = calibration_entry,
           timeStart = mk$timeStart %||% NA_real_,
           timeEnd = mk$timeEnd %||% NA_real_,
           protocolStepIdx = mk$protocolStepIdx %||% NA_real_,
